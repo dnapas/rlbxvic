@@ -1,5 +1,6 @@
--- Auto Answer v3.3 (Matcha) - label-based rounding + type normalization
--- STOP: run `_G.AA_Running = false` in a separate exec.
+-- Auto Solver v3.4 (Matcha) - input injection is dead in this build, so this
+-- shows the answer + key instantly and confirms CORRECT from game text.
+-- No mouse/key calls, cursor stays yours. STOP: `_G.AA_Running = false`.
 
 if _G.AA_Running then _G.AA_Running = false task.wait(0.4) end
 _G.AA_Running = true
@@ -12,16 +13,15 @@ local AC = RCF:WaitForChild("AnswerControl")
 local SC = TC:WaitForChild("SpecialControl")
 local lp = Players.LocalPlayer
 
-local delay = 0.7
+local delay = 0.1
 local enabled = true
 local lastKey = ""
-local answeredKey = ""
-local uiStatus, uiAnswer = "starting...", ""
+local uiStatus, uiAnswer, uiPress = "starting...", "", ""
 local lastNotify = 0
 
-local DIV_SIGN = "\195\183" -- U+00F7 division sign -> /
-local MUL_SIGN = "\195\151" -- U+00D7 multiplication sign -> *
-local MID_DOT = "\194\183"  -- U+00B7 middle dot -> *
+local DIV_SIGN = "\195\183" -- U+00F7 -> /
+local MUL_SIGN = "\195\151" -- U+00D7 -> *
+local MID_DOT = "\194\183"  -- U+00B7 -> *
 
 -- ---------- small utils ----------
 local function trim(s) return (tostring(s):gsub("^%s+", ""):gsub("%s+$", "")) end
@@ -62,11 +62,13 @@ local function cleanMath(s)
     s = s:gsub("\226\128\147", "-"):gsub("\226\128\148", "-")
     return s
 end
+-- verified vulgar fraction codepoints: U+00BC-BE, U+2150-215E
 local VULG = { ["\194\188"] = "1/4", ["\194\189"] = "1/2", ["\194\190"] = "3/4",
-    ["\226\133\147"] = "1/3", ["\226\133\148"] = "2/3", ["\226\133\145"] = "1/5",
-    ["\226\133\150"] = "2/5", ["\226\133\153"] = "3/5", ["\226\133\156"] = "4/5",
-    ["\226\133\154"] = "1/6", ["\226\133\157"] = "5/6",
-    ["\226\133\155"] = "1/8", ["\226\133\158"] = "7/8" }
+    ["\226\133\144"] = "1/7", ["\226\133\145"] = "1/9", ["\226\133\146"] = "1/10",
+    ["\226\133\147"] = "1/3", ["\226\133\148"] = "2/3", ["\226\133\149"] = "1/5",
+    ["\226\133\150"] = "2/5", ["\226\133\151"] = "3/5", ["\226\133\152"] = "4/5",
+    ["\226\133\153"] = "1/6", ["\226\133\154"] = "5/6", ["\226\133\155"] = "1/8",
+    ["\226\133\156"] = "3/8", ["\226\133\157"] = "5/8", ["\226\133\158"] = "7/8" }
 local function expandVulgar(s)
     s = tostring(s)
     for k, v in pairs(VULG) do s = s:gsub(k, " " .. v .. " ") end
@@ -167,15 +169,16 @@ local function solveFractions(tname)
     if s1 and tonumber(s2) ~= 0 then return fmtNum(tonumber(s1) / tonumber(s2)) end
     return nil
 end
-local function solveFracToPct(tname)
-    local s = expandVulgar(cleanMath(tname))
+local function solveFracToPct(tname, label)
+    local s = expandVulgar(cleanMath(tname .. " " .. label))
     local a, b = s:match("(%d+)%s*/%s*(%d+)")
     if a and tonumber(b) ~= 0 then return fmtNum(tonumber(a) / tonumber(b) * 100) .. "%" end
     return nil
 end
-local function solvePctToFrac(tname)
-    local n = tostring(tname):match("(-?%d+%.?%d*)%%")
-    if not n then local ns = numbersIn(tname) n = ns[1] end
+local function solvePctToFrac(tname, label)
+    local s = tostring(tname) .. " " .. tostring(label)
+    local n = s:match("(-?%d+%.?%d*)%%")
+    if not n then local ns = numbersIn(s) n = ns[1] end
     if not n then return nil end
     n = tonumber(n)
     local num, den = math.floor(n * 100 + 0.5), 10000
@@ -235,7 +238,9 @@ end
 local COIN = { penny = 1, pennies = 1, nickel = 5, nickels = 5, dime = 10, dimes = 10,
     quarter = 25, quarters = 25, halfdollar = 50, dollar = 100, dollars = 100,
     one = 100, ones = 100, five = 500, fives = 500, ten = 1000, tens = 1000, twenty = 2000 }
-local function solveMoney()
+local function solveMoney(tname, label)
+    local a = solveArithmetic(tname) or solveArithmetic(label)
+    if a then return a end
     local ok, disp = pcall(function() return SC.MoneyControl.Display.Value end)
     if not ok then return nil end
     local total, found, numSum, numN = 0, false, 0, 0
@@ -314,9 +319,33 @@ local function solve(ttype, tname, label)
     uiAnswerExtra = ""
     local t = trim(tostring(ttype)):lower()
     local L = tostring(label):lower()
-    -- label-driven: fires no matter how garbled or cased the type name is
     if L:find("round%s+to%s+the%s+nearest") or L:find("round%s+to%s+nearest") then
         return solveRounding(tname, label)
+    end
+    if L:find("even or odd") or L:find("odd or even") then
+        local n = numbersIn(cleanMath(tname .. " " .. label))[1]
+        if n then if n % 2 == 0 then return "even" else return "odd" end end
+    end
+    if L:find("what type of angle") or L:find("angle is this") then return solveAngleType() end
+    if L:find("parallel") or L:find("perpendicular") or L:find("what.*lines") then
+        local r = solveAngleLines()
+        if r then return r end
+    end
+    if L:find("what time") or L:find("clock") or L:find("analog") then
+        local r = solveClock()
+        if r then return r end
+    end
+    if L:find("how much") or L:find("money") or L:find("cents") then
+        local r = solveMoney(tname, label)
+        if r then return r end
+    end
+    if L:find("perimeter") then
+        local r = solveShape(false, tname, label)
+        if r then return r end
+    end
+    if L:find("area") then
+        local r = solveShape(true, tname, label)
+        if r then return r end
     end
     if t == "add" or t == "sub" or t == "mul" or t == "div"
         or t == "exp" or t == "pro_exp" or t == "pro_exp3" then
@@ -326,106 +355,69 @@ local function solve(ttype, tname, label)
     elseif t == "seq_geometric" then return solveSequence(tname, true)
     elseif t == "rounding" then return solveRounding(tname, label)
     elseif t == "fractions" then return solveFractions(tname)
-    elseif t == "fractiontopercent" then return solveFracToPct(tname)
-    elseif t == "percentagetofraction" then return solvePctToFrac(tname)
+    elseif t == "fractiontopercent" then return solveFracToPct(tname, label)
+    elseif t == "percentagetofraction" then return solvePctToFrac(tname, label)
     elseif t == "fractioncomparison" or t == "simplecomparison" then
         local r = solveFracCompare(label, tname)
         if r then return r end
-        local s = cleanMath(tname):gsub("%?+", "")
-        local a, op, b = s:match("(-?%d+%.?%d*)%s*([><=])%s*(-?%d+%.?%d*)")
-        if a then
-            a, b = tonumber(a), tonumber(b)
-            local ok = (op == ">" and a > b) or (op == "<" and a < b) or (op == "=" and a == b)
-            if ok then return "true" else return "false" end
-        end
-        return nil
     elseif t == "odd_or_even" or t == "oddoreven" then
         local n = numbersIn(cleanMath(tname))[1]
-        if not n then return nil end
-        if n % 2 == 0 then return "even" else return "odd" end
+        if n then if n % 2 == 0 then return "even" else return "odd" end end
     elseif t == "analogtodigitaltime" then return solveClock()
     elseif t == "perimeterofshape" then return solveShape(false, tname, label)
     elseif t == "areaofshape" then return solveShape(true, tname, label)
-    elseif t == "identifyhowmuchmoney" then return solveMoney()
+    elseif t == "identifyhowmuchmoney" then return solveMoney(tname, label)
     elseif t == "identifyangletype" then return solveAngleType()
     elseif t == "identifyanglelines" then return solveAngleLines()
     end
+    -- generic fallback: label-driven, works with garbage type names
     local g = solveArithmetic(tname) or solveArithmetic(label)
         or solveFractions(tname) or solveFractions(label)
+        or solveFracCompare(label, tname)
+        or solveFracToPct(tname, label) or solvePctToFrac(tname, label)
         or solveAlgebra(tname) or solveAlgebra(label)
+        or solveRounding(tname, label)
     if g then return g end
     local nums = numbersIn(cleanMath(tname .. " " .. label))
     if #nums >= 3 then return solveSequence(tname, false) or solveSequence(tname, true) end
     return nil
 end
 
-local function matchOption(answer)
+local function readOptions()
     local opts = {}
     for i = 1, 4 do
         local ok, v = pcall(function() return AC["Answer" .. i].Value end)
         opts[i] = (ok and v ~= nil) and tostring(v) or ""
     end
+    return opts
+end
+local function optsDegenerate(opts)
+    for i = 1, 4 do
+        local o = opts[i]
+        if o ~= "" and (#o == 1 and string.byte(o, 1) > 127) then return true end
+    end
+    return false
+end
+local function matchOption(answer, opts)
     local na, pa = norm(answer), parseNum(answer)
     for i = 1, 4 do
         if opts[i] ~= "" then
             local no = norm(opts[i])
-            if no == na then return i, opts end
+            if no == na then return i end
             local po = parseNum(opts[i])
-            if pa and po and math.abs(pa - po) < 1e-6 then return i, opts end
-            if pa and po and math.abs(pa * 100 - po) < 1e-6 then return i, opts end
-            if #na >= 3 and (string.find(no, na, 1, true) or string.find(na, no, 1, true)) then return i, opts end
+            if pa and po then
+                local denom = math.max(math.abs(pa), math.abs(po), 1)
+                if math.abs(pa - po) < 1e-6 then return i end
+                if math.abs(pa - po) / denom < 0.002 then return i end
+                if math.abs(pa * 100 - po) < 1e-6 then return i end
+            end
+            if #na >= 3 and (string.find(no, na, 1, true) or string.find(na, no, 1, true)) then return i end
         end
     end
-    return nil, opts
-end
-
--- ---------- input + feedback ----------
-local function kc(name)
-    local ok, v = pcall(function() return Enum.KeyCode[name].Value end)
-    if ok then return v end
     return nil
 end
-local K = { One = kc("One"), Two = kc("Two"), Three = kc("Three"), Four = kc("Four"),
-    A = kc("A"), S = kc("S"), K2 = kc("K"), L = kc("L") }
-local function press(code)
-    if not code then return false end
-    local ok = pcall(function() keypress(code) end)
-    if not ok then return false end
-    task.wait(0.06)
-    pcall(function() keyrelease(code) end)
-    return true
-end
-local function answerByKey(idx)
-    local mode = lp:GetAttribute("keyboardShortcut")
-    local code = nil
-    if mode == 1 then
-        code = ({ K.A, K.S, K.K2, K.L })[idx]
-    else
-        code = ({ K.One, K.Two, K.Three, K.Four })[idx]
-    end
-    return press(code)
-end
-local function answerByClick(idx)
-    local lp2 = lp.PlayerGui:FindFirstChild("Gameplay")
-    if not lp2 then return false end
-    local fr = lp2.AnswerGui.AnswerFrame.CenterFrame.InputFrame:FindFirstChild("Answer" .. idx)
-    if not fr then return false end
-    local btn = fr:FindFirstChild("TriggerBtn")
-    if not btn then return false end
-    local okP, pos = pcall(function() return btn.AbsolutePosition end)
-    local okS, sz = pcall(function() return btn.AbsoluteSize end)
-    if not (okP and okS and pos and sz) then return false end
-    local m = lp:GetMouse()
-    local ox, oy = m.X, m.Y
-    local ok = pcall(function()
-        mousemoveabs(pos.X + sz.X / 2, pos.Y + sz.Y / 2)
-        task.wait(0.08)
-        mouse1click()
-        task.wait(0.08)
-        mousemoveabs(ox, oy)
-    end)
-    return ok
-end
+
+-- ---------- read-only feedback ----------
 local function sameQuestion(tname, ttype)
     local ok, a = pcall(function() return TC.TopicName.Value end)
     local ok2, b = pcall(function() return TC.TopicType.Value end)
@@ -440,7 +432,7 @@ local function readFeedback()
     pcall(function() it = cf.InvalidFrame.InfoLabel.Text end)
     return vt, it
 end
-local function waitFeedback(tname, ttype, oldValid, oldInvalid, timeout)
+local function waitConfirm(tname, ttype, oldValid, oldInvalid, timeout)
     local t0 = tick()
     while tick() - t0 < timeout do
         if not sameQuestion(tname, ttype) then return "moved" end
@@ -451,7 +443,7 @@ local function waitFeedback(tname, ttype, oldValid, oldInvalid, timeout)
         if it and it ~= oldInvalid and tostring(it) ~= "" then
             return "wrong", tostring(it)
         end
-        task.wait(0.2)
+        task.wait(0.25)
     end
     if not sameQuestion(tname, ttype) then return "moved" end
     return "timeout"
@@ -460,11 +452,6 @@ local function isAlive()
     local ok, v = pcall(function() return lp:GetAttribute("IsAlive") end)
     return ok and v == true
 end
-local function focused()
-    local ok, v = pcall(function() return isrbxactive() end)
-    if not ok then return true end
-    return v
-end
 local function timeLeft()
     local ok, v = pcall(function() return TC.TimerValue.Value end)
     if ok and tonumber(v) then return tonumber(v) end
@@ -472,7 +459,7 @@ local function timeLeft()
 end
 
 -- ---------- panel (movable, minimizable) ----------
-local PX, PY, W = 20, 20, 320
+local PX, PY, W = 20, 20, 340
 local minimized = false
 local dragging = false
 local gx, gy = 0, 0
@@ -488,12 +475,13 @@ local function txt(x, y, size, color)
     return t
 end
 local title = txt(0, 0, 15, Color3.fromRGB(255, 255, 255))
-title.Text = "Auto Answer v3.3"
+title.Text = "Auto Solver v3.4"
 local stx = txt(0, 0, 13, Color3.fromRGB(190, 195, 215))
-local anx = txt(0, 0, 14, Color3.fromRGB(110, 255, 140))
-local dlx = txt(0, 0, 13, Color3.fromRGB(255, 214, 100))
+local anx = txt(0, 0, 15, Color3.fromRGB(110, 255, 140))
+local prx = txt(0, 0, 20, Color3.fromRGB(255, 214, 100))
+local dlx = txt(0, 0, 12, Color3.fromRGB(255, 214, 100))
 local htx = txt(0, 0, 12, Color3.fromRGB(140, 145, 165))
-htx.Text = "drag bar to move | -/+ speed | INST 0.35s"
+htx.Text = "drag bar to move | solver only, you press 1-4"
 local function btn(label, color)
     local b = Drawing.new("Square")
     b.Color = color b.Filled = true b.Transparency = 0.15 b.Visible = true
@@ -505,18 +493,18 @@ end
 local bTog, tTog = btn("ON", Color3.fromRGB(40, 120, 70))
 local bMin, tMin = btn("-", Color3.fromRGB(60, 64, 90))
 local bPlus, tPlus = btn("+", Color3.fromRGB(60, 64, 90))
-local bInst, tInst = btn("INST", Color3.fromRGB(90, 70, 140))
+local bInst, tInst = btn("FAST", Color3.fromRGB(90, 70, 140))
 local bHide, tHide = btn("_", Color3.fromRGB(60, 64, 90))
 
 local function layout()
-    local H = minimized and 30 or 152
+    local H = minimized and 30 or 176
     bg.Position = Vector2.new(PX, PY) bg.Size = Vector2.new(W, H)
     bar.Position = Vector2.new(PX, PY) bar.Size = Vector2.new(W, 30)
     title.Position = Vector2.new(PX + 10, PY + 6)
     bHide.Position = Vector2.new(PX + W - 36, PY + 4) bHide.Size = Vector2.new(26, 22)
     tHide.Position = Vector2.new(PX + W - 29, PY + 5)
     local vis = not minimized
-    stx.Visible, anx.Visible, dlx.Visible, htx.Visible = vis, vis, vis, vis
+    stx.Visible, anx.Visible, prx.Visible, dlx.Visible, htx.Visible = vis, vis, vis, vis, vis
     bTog.Visible, tTog.Visible = vis, vis
     bMin.Visible, tMin.Visible = vis, vis
     bPlus.Visible, tPlus.Visible = vis, vis
@@ -524,8 +512,9 @@ local function layout()
     if not vis then return end
     stx.Position = Vector2.new(PX + 10, PY + 36)
     anx.Position = Vector2.new(PX + 10, PY + 54)
-    dlx.Position = Vector2.new(PX + 10, PY + 74)
-    local by = PY + 94
+    prx.Position = Vector2.new(PX + 10, PY + 74)
+    dlx.Position = Vector2.new(PX + 10, PY + 102)
+    local by = PY + 120
     bTog.Position = Vector2.new(PX + 10, by) bTog.Size = Vector2.new(64, 28)
     tTog.Position = Vector2.new(PX + 24, by + 5)
     bMin.Position = Vector2.new(PX + 80, by) bMin.Size = Vector2.new(38, 28)
@@ -555,11 +544,11 @@ task.spawn(function()
             elseif not minimized and inside(m.X, m.Y, bTog) then
                 enabled = not enabled lastClick = tick()
             elseif not minimized and inside(m.X, m.Y, bMin) then
-                delay = math.max(0.35, delay - 0.1) lastClick = tick()
+                delay = math.max(0, delay - 0.1) lastClick = tick()
             elseif not minimized and inside(m.X, m.Y, bPlus) then
                 delay = math.min(5, delay + 0.1) lastClick = tick()
             elseif not minimized and inside(m.X, m.Y, bInst) then
-                delay = 0.35 lastClick = tick()
+                delay = 0 lastClick = tick()
             elseif inBar(m.X, m.Y) then
                 dragging, gx, gy = true, m.X - PX, m.Y - PY
             end
@@ -570,12 +559,13 @@ task.spawn(function()
         layout()
         if enabled then tTog.Text = "ON" bTog.Color = Color3.fromRGB(40, 120, 70)
         else tTog.Text = "OFF" bTog.Color = Color3.fromRGB(120, 45, 45) end
-        dlx.Text = string.format("Delay: %.2fs (min 0.35, rate-limit floor)", delay)
-        stx.Text = string.sub(uiStatus, 1, 52)
-        anx.Text = string.sub(uiAnswer, 1, 52)
+        dlx.Text = string.format("Show delay: %.1fs", delay)
+        stx.Text = string.sub(uiStatus, 1, 54)
+        anx.Text = string.sub(uiAnswer, 1, 54)
+        prx.Text = string.sub(uiPress, 1, 40)
         task.wait(0.03)
     end
-    for _, d in ipairs({ bg, bar, title, stx, anx, dlx, htx, bTog, tTog, bMin, tMin,
+    for _, d in ipairs({ bg, bar, title, stx, anx, prx, dlx, htx, bTog, tTog, bMin, tMin,
         bPlus, tPlus, bInst, tInst, bHide, tHide }) do pcall(function() d:Remove() end) end
     print("[AutoAnswer] stopped")
 end)
@@ -599,72 +589,62 @@ task.spawn(function()
                 end
                 uiStatus = (ttype or "?") .. ": " .. string.sub(tostring(label ~= "" and label or tname), 1, 60)
                 if not enabled then
-                    uiAnswer = "paused"
-                elseif not isAlive() then
-                    uiAnswer = "you are out, skipping"
-                elseif not focused() then
-                    uiAnswer = "focus the Roblox window!"
-                    if tick() - lastNotify > 10 then
-                        lastNotify = tick()
-                        pcall(function() notify("Auto Answer", "Click back into Roblox so answers apply", 3) end)
-                    end
-                elseif answeredKey ~= key then
-                    local early = solve(ttype, tname, label)
-                    if early then
-                        uiAnswer = "answer: " .. tostring(early) .. (uiAnswerExtra or "")
-                    end
-                    task.wait(math.max(delay, 0.35))
-                    if timeLeft() < 2 then
-                        uiAnswer = "too late, skipping"
-                    elseif sameQuestion(tname, ttype) and enabled and isAlive() then
-                        local ans = solve(ttype, tname, label)
-                        if ans then
-                            uiAnswer = "answer: " .. tostring(ans) .. (uiAnswerExtra or "")
-                            print("[AutoAnswer] " .. uiStatus .. " -> " .. tostring(ans))
-                            local idx, opts = matchOption(ans)
-                            if idx then
-                                answeredKey = key
-                                local oldValid, oldInvalid = readFeedback()
-                                local sent = answerByKey(idx)
-                                local method = "key"
-                                if not sent then sent, method = answerByClick(idx), "click" end
-                                local res, detail = waitFeedback(tname, ttype, oldValid, oldInvalid, 2.5)
-                                if res == "correct" then
-                                    uiAnswer = "CORRECT: " .. tostring(detail):sub(1, 30)
-                                elseif res == "moved" then
-                                    uiAnswer = "answer " .. tostring(ans) .. " applied [" .. method .. idx .. "]"
-                                elseif res == "wrong" then
-                                    uiAnswer = "marked wrong: " .. tostring(detail):sub(1, 30)
-                                    print("[AutoAnswer] WRONG per game: " .. uiStatus .. " answered " .. tostring(ans))
-                                else
-                                    if method == "key" then answerByClick(idx) else answerByKey(idx) end
-                                    local res2, detail2 = waitFeedback(tname, ttype, oldValid, oldInvalid, 2.5)
-                                    if res2 == "correct" then
-                                        uiAnswer = "CORRECT (retry): " .. tostring(detail2):sub(1, 26)
-                                    elseif res2 == "moved" or res2 == "wrong" then
-                                        uiAnswer = "applied (retry) " .. tostring(res2)
-                                    else
-                                        uiAnswer = "no response to input, check focus"
-                                        print("[AutoAnswer] NO RESPONSE: " .. uiStatus .. " ans " .. tostring(ans))
-                                    end
-                                end
-                            else
-                                uiAnswer = "no option match: " .. tostring(table.concat(opts, "|")):sub(1, 44)
-                                print("[AutoAnswer] no match for " .. tostring(ans) .. " opts=" .. tostring(table.concat(opts, "|")))
-                            end
-                        else
-                            uiAnswer = "unsupported [" .. tostring(#tostring(ttype)) .. "b]: " .. tostring(ttype)
-                            print("[AutoAnswer] unsupported typelen=" .. tostring(#tostring(ttype)) .. " status=" .. uiStatus)
+                    uiAnswer, uiPress = "paused", ""
+                else
+                    if delay > 0 then task.wait(delay) end
+                    -- re-read: values replicate late, adopt fresh ones
+                    local fT, fN = ttype, tname
+                    pcall(function() fT = TC.TopicType.Value end)
+                    pcall(function() fN = TC.TopicName.Value end)
+                    if fN ~= "" and (fT ~= ttype or fN ~= tname) then
+                        ttype, tname = fT, fN
+                        lastKey = ttype .. "||" .. tname
+                        if lp2 then
+                            local okL, lv = pcall(function()
+                                return lp2.TopicGui.TopicFrame.CenterFrame.TopicLabel.Text
+                            end)
+                            if okL and lv then label = lv end
                         end
-                    elseif not sameQuestion(tname, ttype) then
-                        uiAnswer = "question changed before delay ended"
+                        uiStatus = (ttype or "?") .. ": " .. string.sub(tostring(label ~= "" and label or tname), 1, 60)
                     end
+                    local ans = solve(ttype, tname, label)
+                    if ans then
+                        local opts = readOptions()
+                        if optsDegenerate(opts) then
+                            task.wait(0.5)
+                            opts = readOptions()
+                        end
+                        local idx = matchOption(ans, opts)
+                        uiAnswer = "answer: " .. tostring(ans) .. (uiAnswerExtra or "")
+                        if idx then
+                            uiPress = "PRESS  [" .. tostring(idx) .. "]  (" .. tostring(opts[idx]):sub(1, 18) .. ")"
+                        else
+                            uiPress = "find it manually"
+                            uiAnswer = uiAnswer .. " | opts: " .. tostring(table.concat(opts, "|")):sub(1, 40)
+                        end
+                        print("[Solver] " .. uiStatus .. " -> " .. tostring(ans) .. (idx and (" [key " .. idx .. "]") or " [NO MATCH]"))
+                        local oldValid, oldInvalid = readFeedback()
+                        local res, detail = waitConfirm(tname, ttype, oldValid, oldInvalid, 6)
+                        if res == "correct" then
+                            uiPress = "CONFIRMED CORRECT"
+                        elseif res == "wrong" then
+                            uiPress = "game says WRONG, check log"
+                            print("[Solver] WRONG per game: " .. uiStatus .. " showed " .. tostring(ans))
+                        end
+                    else
+                        uiAnswer = "unsupported [" .. tostring(#tostring(ttype)) .. "b]"
+                        uiPress = ""
+                        print("[Solver] unsupported typelen=" .. tostring(#tostring(ttype)) .. " status=" .. uiStatus)
+                    end
+                    if not isAlive() then uiStatus = uiStatus .. " (you are out)" end
                 end
             end
         else
-            if uiStatus ~= "waiting for question..." then uiStatus = "waiting for question..." uiAnswer = "" end
+            if uiStatus ~= "waiting for question..." then
+                uiStatus, uiAnswer, uiPress = "waiting for question...", "", ""
+            end
         end
         task.wait(0.15)
     end
 end)
-print("[AutoAnswer v3.3] started. Drag the bar to move, _ to minimize.")
+print("[Auto Solver v3.4] started. Read the PRESS line and tap the key.")
