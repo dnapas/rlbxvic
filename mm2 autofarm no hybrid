@@ -1,8 +1,8 @@
--- MM2 Candy V14 - V6-style direct glide / ordinary weapon input
+-- MM2 Candy V15 - V6-style direct glide / ordinary weapon input
 -- Stop V6/V10 and other old loops; respawn once before first use.
 -- F6 deliberately toggles farming while Roblox is focused. No F8 unload binding.
 -- Candy movement does not need window focus. Recoverable errors retry automatically.
--- Weapon/reset input requires the attached Roblox window to be focused.
+-- Murderer approach works in the background. Weapon/reset input requires focus.
 -- No combat/role remote calls. Hybrid-off compatibility needs a live test.
 -- Matches V6's straight XYZ interpolation, with no below-coin offset.
 
@@ -23,6 +23,7 @@ local CFG = {
     KnifeRange = 3.5,
     GunRange = 3.75,
     CombatStand = 3,
+    KnifeStand = 2.5,
     RetryDelay = 2,
     KnifeDelay = 0.85,
     GunDelay = 3,
@@ -34,7 +35,7 @@ local function read(fn)
     local ok, value = pcall(fn)
     if ok then return value end
 end
-local function log(s) print("[V14] " .. tostring(s)) end
+local function log(s) print("[V15] " .. tostring(s)) end
 local function child(p, name)
     return p and read(function() return p:FindFirstChild(name) end)
 end
@@ -79,11 +80,13 @@ end
 local v11 = read(function() return _G.MM2_CANDY_V11 end)
 if v11 and type(v11.Stop)=="function" then v11.Stop() end
 local v12=read(function() return _G.MM2_CANDY_V12 end)
-if v12 and type(v12.Stop)=="function" then v12.Stop("replaced by V14") end
+if v12 and type(v12.Stop)=="function" then v12.Stop("replaced by V15") end
 local v13=read(function() return _G.MM2_CANDY_V13 end)
-if v13 and type(v13.Stop)=="function" then v13.Stop("replaced by V14") end
-local previous = read(function() return _G.MM2_CANDY_V14 end)
-if previous and type(previous.Stop) == "function" then previous.Stop("replaced by new V14 instance") end
+if v13 and type(v13.Stop)=="function" then v13.Stop("replaced by V15") end
+local v14=read(function() return _G.MM2_CANDY_V14 end)
+if v14 and type(v14.Stop)=="function" then v14.Stop("replaced by V15") end
+local previous = read(function() return _G.MM2_CANDY_V15 end)
+if previous and type(previous.Stop) == "function" then previous.Stop("replaced by new V15 instance") end
 local S = {
     running=true, enabled=true, finish=true, phase="WAIT ROUND",
     active=false, round=0, charKey=nil, mapKey=nil, paused=false,
@@ -98,8 +101,9 @@ local S = {
     resetState=nil, resetAt=0, resetKey=nil,
     retryAt=0, retryCount=0, f6Armed=false, combatSpot=nil,
     uiBlock="none", aimPoint=nil, stableAt=nil,
+    murderSpot=nil, murderRevision=0, murderSide=0,
 }
-pcall(function() _G.MM2_CANDY_V14 = S end)
+pcall(function() _G.MM2_CANDY_V15 = S end)
 local function notice(tag,msg,delay)
     if tick() >= (S.nextLog[tag] or 0) then
         S.nextLog[tag] = tick() + (delay or 6)
@@ -198,7 +202,7 @@ local function motionFailure(message)
     S.retryAt=tick()+math.min(15,CFG.RetryDelay*S.retryCount)
     releaseMovement(true)
     if S.target and S.target.id then S.cooldown[S.target.id]=S.retryAt+3 end
-    S.target=nil; S.combatSpot=nil; S.stableAt=nil; S.aimPoint=nil
+    S.target=nil; S.combatSpot=nil; S.stableAt=nil; S.aimPoint=nil; S.murderSpot=nil
     log(message.." Auto-retry in "..math.ceil(S.retryAt-tick()).."s; farm remains enabled.")
 end
 local function startGlide(goal,id,rate)
@@ -291,7 +295,7 @@ end
 local function clearAction()
     releaseMovement(true)
     cancelReset()
-    S.target=nil; S.combatSpot=nil; S.aimPoint=nil
+    S.target=nil; S.combatSpot=nil; S.aimPoint=nil; S.murderSpot=nil
 end
 function S.Stop(reason)
     if not S.running then return end
@@ -301,13 +305,13 @@ function S.Stop(reason)
 end
 
 local uiReady = pcall(function()
-    UI.AddTab("MM2 Candy V14", function(tab)
+    UI.AddTab("MM2 Candy V15", function(tab)
         local section=tab:Section("V6-style glide", "Left")
-        section:Toggle("mm2_v14_farm", "Enable Autofarm")
-        section:Toggle("mm2_v14_finish", "Finish Rounds at 50")
+        section:Toggle("mm2_v15_farm", "Enable Autofarm")
+        section:Toggle("mm2_v15_finish", "Finish Rounds at 50")
     end)
-    UI.SetValue("mm2_v14_farm",true)
-    UI.SetValue("mm2_v14_finish",true)
+    UI.SetValue("mm2_v15_farm",true)
+    UI.SetValue("mm2_v15_finish",true)
 end)
 local function pressed(k)
     local down=read(function() return iskeypressed(k) end) == true
@@ -318,8 +322,8 @@ end
 local function controls()
     local old=S.enabled
     if uiReady then
-        local a=read(function() return UI.GetValue("mm2_v14_farm") end)
-        local b=read(function() return UI.GetValue("mm2_v14_finish") end)
+        local a=read(function() return UI.GetValue("mm2_v15_farm") end)
+        local b=read(function() return UI.GetValue("mm2_v15_finish") end)
         if type(a)=="boolean" then S.enabled=a end
         if type(b)=="boolean" then S.finish=b end
     end
@@ -327,7 +331,7 @@ local function controls()
     if not f6Down then S.f6Armed=true end
     if pressed(0x75) and S.f6Armed and focused() then
         S.enabled=not S.enabled
-        if uiReady then pcall(function() UI.SetValue("mm2_v14_farm",S.enabled) end) end
+        if uiReady then pcall(function() UI.SetValue("mm2_v15_farm",S.enabled) end) end
     end
     if old~=S.enabled then
         clearAction()
@@ -823,6 +827,40 @@ local function settleCombat(target)
     S.stableAt=S.stableAt or tick()
     return tick()-S.stableAt>=0.25
 end
+-- The knife approach does not require the sheriff's floor/stance solver.
+-- Keep the established glide supporting the character at a fixed commanded Y.
+local function settleMurderer(target)
+    local q=xyz(child(target.Character,"HumanoidRootPart"))
+    local _,r=selfParts()
+    local p=xyz(r)
+    if not p or not q then return false end
+    local spot=S.murderSpot
+    if not spot or spot.target~=key(target) or dist(spot.targetPos,q)>0.5 then
+        local d=flat(p,q)
+        local dx,dz=0,1
+        if d>0.1 then dx,dz=(p.x-q.x)/d,(p.z-q.z)/d end
+        local angle=math.rad((S.murderSide or 0)*45)
+        dx,dz=dx*math.cos(angle)-dz*math.sin(angle),dx*math.sin(angle)+dz*math.cos(angle)
+        S.murderRevision=S.murderRevision+1
+        spot={target=key(target),targetPos=q,
+            id="murder:"..key(target)..":"..S.murderRevision,
+            p={x=q.x+dx*CFG.KnifeStand,y=q.y+0.1,z=q.z+dz*CFG.KnifeStand},
+            arrivedAt=nil}
+        S.murderSpot=spot
+        log("Knife approach: "..target.Name.." at "..CFG.KnifeStand.." studs; gliding at target height.")
+    end
+    if not startGlide(spot.p,spot.id,CFG.Speed) then return false end
+    local f=S.flight
+    if not f or f.goalID~=spot.id or not f.arrived or dist(p,spot.p)>0.65 then
+        S.phase="KNIFE APPROACH"
+        spot.arrivedAt=nil
+        return false
+    end
+    -- No release or repeated sampling of falling Position during aim/reload.
+    -- The worker holds this fixed point until the next target or round change.
+    spot.arrivedAt=spot.arrivedAt or tick()
+    return tick()-spot.arrivedAt>=0.2
+end
 local function resetTick()
     S.phase="RESET"
     releaseMovement(true)
@@ -864,8 +902,11 @@ local function finish()
     end
     S.phase="FINISH "..current
     local wanted=current=="Murderer" and "knife" or "gun"
-    local weapon=equip(wanted)
-    if not weapon then stopGlide(); return end
+    local weapon
+    if current~="Murderer" then
+        weapon=equip(wanted)
+        if not weapon then stopGlide(); return end
+    end
     local _,r=selfParts()
     local p=xyz(r)
     if not p then return end
@@ -882,7 +923,7 @@ local function finish()
             S.target=nil; S.nav=nil; t=nil
         elseif not live(victim) or (current~="Murderer" and not tool(victim,"knife")) then
             S.target=nil; S.nav=nil; t=nil
-        elseif tick()-S.targetAt>(S.targetTravelBudget or CFG.TargetTimeout) then
+        elseif tick()-S.targetAt>(S.targetTravelBudget or CFG.TargetTimeout) and focused() then
             S.victims[key(victim)]=tick()+5
             notice("targetTimeout","Target not eliminated within time limit; retrying later.",5)
             S.target=nil; S.nav=nil; t=nil
@@ -914,9 +955,23 @@ local function finish()
     local q=xyz(child(other,"HumanoidRootPart"))
     if not q then return end
     local range=current=="Murderer" and CFG.KnifeRange or CFG.GunRange
-    if not settleCombat(t.player) then return end
+    if current=="Murderer" then
+        if not settleMurderer(t.player) then return end
+        if not focused() then
+            S.phase="WAIT FOCUS INPUT"
+            notice("knifeFocus","At knife range; focus the attached Roblox window to equip/attack. Approach remains active.",8)
+            return
+        end
+        weapon=equip(wanted)
+        if not weapon then S.phase="WAIT KNIFE EQUIP"; return end
+    elseif not settleCombat(t.player) then return end
     if not shotClear(t.player) then
-        S.combatSpot=nil
+        if current=="Murderer" then
+            S.phase="WAIT KNIFE LINE OF SIGHT"
+            S.murderSpot=nil
+            S.murderSide=((S.murderSide or 0)+1)%8
+            notice("knifeSight","At knife range but line of sight is blocked or unavailable; trying another side.",5)
+        else S.combatSpot=nil end
         return
     end
     if tick()<S.nextAttack or tick()<S.nextAim then return end
@@ -962,6 +1017,7 @@ local function beginRound(map,cc,charKey)
     S.first=true; S.moveWrites=0; S.moved=0; S.lastMoveError="none"
     S.retryAt=0; S.retryCount=0; S.combatSpot=nil; S.stableAt=nil; S.uiBlock="none"
     S.targetTravelBudget=nil; S.moveMode="Position"
+    S.murderSpot=nil; S.murderRevision=0; S.murderSide=0
     log("Round/character ready: "..map.Name..". V6-style direct glide; Candy bag counter.")
 end
 local function step(dt)
@@ -997,7 +1053,7 @@ local function step(dt)
     end
     if not active or not S.enabled then return end
     if tick()<S.retryAt then S.phase="RECOVER"; return end
-    if S.full and not focused() then
+    if S.full and not focused() and role(player)~="Murderer" then
         if not S.paused then stopGlide(); cancelReset(); S.paused=true end
         S.phase="WAIT FOCUS"
         notice("focus","Focus the attached Roblox window to resume; input/movement paused.",10)
@@ -1010,7 +1066,9 @@ local function step(dt)
         S.nextNav=0
     end
     if S.full then
-        if S.finishAt then S.finishElapsed=S.finishElapsed+dt end
+        if S.finishAt and (focused() or (S.flight and S.flight.segment)) then
+            S.finishElapsed=S.finishElapsed+dt
+        end
         finish()
     elseif S.bag and S.bag>=CFG.Limit then
         stopGlide(); S.phase="WAIT FRESH BAG"
