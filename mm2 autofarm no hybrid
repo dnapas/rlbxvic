@@ -1,0 +1,937 @@
+-- MM2 Candy V13 - V6-style direct glide / ordinary weapon input
+-- Stop V6/V10 and other old loops; respawn once before first use.
+-- F6 deliberately toggles farming while Roblox is focused. No F8 unload binding.
+-- Candy movement does not need window focus. Recoverable errors retry automatically.
+-- Weapon/reset input requires the attached Roblox window to be focused.
+-- No combat/role remote calls. Hybrid-off compatibility needs a live test.
+-- Matches V6's straight XYZ interpolation, with no below-coin offset.
+
+local CFG = {
+    Username = "oneovernull",
+    Limit = 50,
+    Speed = 30,              -- Same normal travel speed as the supplied V6. 			-- Updated from 20 to 30
+    FirstSpeed = 999,         -- Same fast initial approach as V6.
+    MoveTick = 0.03,
+    PickupHold = 0.35,
+    MaxTargetDistance = 250,
+    MoveStallSeconds = 1.5,
+    Tick = 0.05,
+    CoinTimeout = 12,
+    CoinCooldown = 8,
+    FinishTimeout = 90,       -- Time to approach multiple players.
+    TargetTimeout = 18,
+    KnifeRange = 3.5,
+    GunRange = 3.75,
+    CombatStand = 3,
+    RetryDelay = 2,
+    KnifeDelay = 0.85,
+    GunDelay = 3,
+    EquipDelay = 0.8,
+    AllowReset = true,
+}
+
+local function read(fn)
+    local ok, value = pcall(fn)
+    if ok then return value end
+end
+local function log(s) print("[V13] " .. tostring(s)) end
+local function child(p, name)
+    return p and read(function() return p:FindFirstChild(name) end)
+end
+local function children(p)
+    return (p and read(function() return p:GetChildren() end)) or {}
+end
+local function attr(p, name)
+    return p and read(function() return p:GetAttribute(name) end)
+end
+local function finite(n)
+    return type(n) == "number" and n == n and math.abs(n) < 10000000
+end
+local function xyz(p)
+    local v = p and read(function() return p.Position end)
+    if v and finite(v.X) and finite(v.Y) and finite(v.Z) then
+        return {x=v.X, y=v.Y, z=v.Z}
+    end
+end
+local function vec(p) return Vector3.new(p.x, p.y, p.z) end
+local function dist(a,b)
+    return math.sqrt((a.x-b.x)^2 + (a.y-b.y)^2 + (a.z-b.z)^2)
+end
+local function flat(a,b)
+    return math.sqrt((a.x-b.x)^2 + (a.z-b.z)^2)
+end
+local function key(obj)
+    return tostring(read(function() return obj.Address end) or obj)
+end
+
+local Players, player
+for i=1,20 do
+    Players = read(function() return game:GetService("Players") end)
+    player = Players and read(function() return Players.LocalPlayer end)
+    if player then break end
+    task.wait(0.5)
+end
+if not player then log("LocalPlayer unavailable; attach to the intended process.") return end
+if tostring(player.Name):lower() ~= CFG.Username:lower() then
+    log("Alt account; stopped.") return
+end
+
+local v11 = read(function() return _G.MM2_CANDY_V11 end)
+if v11 and type(v11.Stop)=="function" then v11.Stop() end
+local v12=read(function() return _G.MM2_CANDY_V12 end)
+if v12 and type(v12.Stop)=="function" then v12.Stop("replaced by V13") end
+local previous = read(function() return _G.MM2_CANDY_V13 end)
+if previous and type(previous.Stop) == "function" then previous.Stop("replaced by new V13 instance") end
+local S = {
+    running=true, enabled=true, finish=true, phase="WAIT ROUND",
+    active=false, round=0, charKey=nil, mapKey=nil, paused=false,
+    bag=nil, raw="?", bagSource="missing", seenBelowLimit=false, full=false,
+    coins={}, cooldown={}, attempts=0, collectedSignals=0, bagGain=0,
+    target=nil, targetAt=0, nextBag=0, nextCoins=0, nextPlayers=0,
+    nextStatus=0, nextWalk=0, nextAim=0, nextAttack=0, nextEquip=0,
+    nextSafety=0, nextNav=0, nextLog={}, keys={}, roster={},
+    flight=nil, collisions={}, first=true, moveWrites=0, moved=0,
+    moveMode="Position", lastMoveError="none", landing=nil, nav=nil,
+    finishAt=nil, finishElapsed=0, victims={}, eliminated=0, clicks=0,
+    resetState=nil, resetAt=0, resetKey=nil,
+    retryAt=0, retryCount=0, f6Armed=false, combatSpot=nil,
+    uiBlock="none", aimPoint=nil, stableAt=nil,
+}
+pcall(function() _G.MM2_CANDY_V13 = S end)
+local function notice(tag,msg,delay)
+    if tick() >= (S.nextLog[tag] or 0) then
+        S.nextLog[tag] = tick() + (delay or 6)
+        log(msg)
+    end
+end
+local function selfParts()
+    local c = read(function() return player.Character end)
+    local r = child(c,"HumanoidRootPart")
+    local h = c and read(function() return c:FindFirstChildOfClass("Humanoid") end)
+    return c,r,h
+end
+local function focused()
+    -- Fail closed: never send mouse/key input to an unverified foreground app.
+    return read(function() return isrbxactive() end) == true
+end
+local function zeroVelocity(r)
+    local ok=pcall(function() r.AssemblyLinearVelocity=Vector3.new(0,0,0) end)
+    if not ok then ok=pcall(function() r.Velocity=Vector3.new(0,0,0) end) end
+    return ok
+end
+local function writePosition(r,p)
+    local ok,err
+    if S.moveMode=="Position" then
+        ok,err=pcall(function() r.Position=vec(p) end)
+        if not ok then S.moveMode="CFrame" end
+    end
+    if S.moveMode=="CFrame" then
+        ok,err=pcall(function() r.CFrame=CFrame.new(p.x,p.y,p.z) end)
+    end
+    if not ok then S.lastMoveError=tostring(err) end
+    return ok
+end
+local function restoreCollisions()
+    for _,entry in pairs(S.collisions) do
+        pcall(function() entry.part.CanCollide=entry.value end)
+    end
+    S.collisions={}
+end
+local function releaseMovement(returnToStart)
+    local f=S.flight
+    S.flight=nil -- Invalidate the worker before restoring any physics settings.
+    if f and returnToStart then
+        local c,r=selfParts()
+        local timer=child(workspace,"RoundTimerPart")
+        local left=attr(timer,"Time")
+        local sameMap=false
+        for _,m in ipairs(children(workspace)) do
+            if key(m)==f.map then sameMap=true; break end
+        end
+        if c and r and key(c)==f.char and sameMap and attr(player,"Alive")==true
+            and type(left)=="number" and left>0 then
+            -- The initial point was captured before this session disabled collisions.
+            -- Return there on manual stop/error rather than solidifying inside a wall.
+            writePosition(r,f.returnPoint)
+            zeroVelocity(r)
+        end
+    end
+    restoreCollisions()
+end
+local function stopGlide()
+    local f=S.flight
+    if f then
+        -- Preserve the commanded point. Sampling the falling actual position
+        -- on every combat tick ratcheted V12's hold downward through the floor.
+        f.segment=nil
+        f.hold=f.lastCommand or f.hold
+    end
+end
+local function refreshNoclip(c)
+    local parts=read(function() return c:GetDescendants() end) or children(c)
+    for _,part in ipairs(parts) do
+        local isPart=read(function() return part:IsA("BasePart") end)
+        if isPart or part.ClassName=="Part" or part.ClassName=="MeshPart" then
+            local id=key(part)
+            if not S.collisions[id] then
+                local old=read(function() return part.CanCollide end)
+                if type(old)=="boolean" then S.collisions[id]={part=part,value=old} end
+            end
+            if S.collisions[id] then
+                local ok,err=pcall(function() part.CanCollide=false end)
+                if not ok then assert(false,"Cannot enable temporary noclip: "..tostring(err)) end
+            end
+        end
+    end
+end
+local function motionFailure(message)
+    -- Preserve the user's enabled preference; release bad movement and retry.
+    S.phase="RECOVER"
+    S.lastMoveError=message
+    S.retryCount=S.retryCount+1
+    S.retryAt=tick()+math.min(15,CFG.RetryDelay*S.retryCount)
+    releaseMovement(true)
+    if S.target and S.target.id then S.cooldown[S.target.id]=S.retryAt+3 end
+    S.target=nil; S.combatSpot=nil; S.stableAt=nil; S.aimPoint=nil
+    log(message.." Auto-retry in "..math.ceil(S.retryAt-tick()).."s; farm remains enabled.")
+end
+local function startGlide(goal,id,rate)
+    local c,r=selfParts()
+    local p=xyz(r)
+    if not c or not p or tick()<S.retryAt then return false end
+    if not S.flight then
+        local f={root=r,char=key(c),map=S.mapKey,returnPoint=p,hold=p,
+            nextClip=0,nextCheck=tick()+CFG.MoveStallSeconds,checkPos=p,
+            checkGoal=goal,commandDistance=0,arrived=false}
+        S.flight=f
+        refreshNoclip(c)
+        f.nextClip=tick()+0.4
+    end
+    local f=S.flight
+    if f.char~=key(c) then return false end
+    if f.segment and f.segment.id==id and dist(f.segment.goal,goal)<1 then return true end
+    if not f.segment and f.goalID==id and dist(f.hold,goal)<0.2 then return true end
+    f.segment={from=p,goal=goal,at=tick(),duration=dist(p,goal)/math.max(rate,1),id=id}
+    f.goalID=id; f.arrived=false
+    return true
+end
+local function movementTick()
+    local f=S.flight
+    if not f then return end
+    local c,r=selfParts()
+    local timer=child(workspace,"RoundTimerPart")
+    local left=attr(timer,"Time")
+    if not S.running or not S.enabled or not c or not r or key(c)~=f.char
+        or attr(player,"Alive")~=true or type(left)~="number" or left<=0 then
+        releaseMovement(false)
+        return
+    end
+    if tick()>=f.nextClip then
+        f.nextClip=tick()+0.4
+        refreshNoclip(c)
+    end
+    local observed=xyz(r)
+    if not observed then motionFailure("Root position unreadable."); return end
+    local desired=f.hold
+    local segment=f.segment
+    if segment then
+        local alpha=math.min((tick()-segment.at)/math.max(segment.duration,0.001),1)
+        local a,b=segment.from,segment.goal
+        desired={x=a.x+(b.x-a.x)*alpha,y=a.y+(b.y-a.y)*alpha,z=a.z+(b.z-a.z)*alpha}
+        if alpha>=1 then
+            f.segment=nil; f.arrived=true; f.arrivedAt=tick()
+        end
+    end
+    -- Compare observed motion, not just whether a setter returned successfully.
+    f.commandDistance=math.max(f.commandDistance,dist(f.checkPos,desired))
+    if tick()>=f.nextCheck then
+        local moved=dist(observed,f.checkPos)
+        S.moved=moved
+        if f.commandDistance>2 and moved<0.25 then
+            if S.moveMode=="Position" then
+                S.moveMode="CFrame"
+                log("Position writes produced no observed travel; trying CFrame.")
+            else
+                motionFailure("Both movement setters produced no observed travel; check attachment/competing scripts.")
+                return
+            end
+        elseif f.lastCommand and dist(observed,f.lastCommand)>15 then
+            f.corrections=(f.corrections or 0)+1
+            if f.corrections>=2 then
+                motionFailure("Repeated position corrections or falling detected; returned to glide start.")
+                return
+            end
+        else f.corrections=0 end
+        f.checkPos=observed; f.commandDistance=0
+        f.nextCheck=tick()+CFG.MoveStallSeconds
+    end
+    if S.flight~=f then return end
+    if not zeroVelocity(r) then motionFailure("Velocity writes unavailable; glide stopped."); return end
+    if S.flight~=f or not S.running or not S.enabled then return end
+    if not writePosition(r,desired) then motionFailure("Movement write failed: "..S.lastMoveError); return end
+    f.hold=desired; f.lastCommand=desired; S.moveWrites=S.moveWrites+1
+end
+local function cancelReset()
+    if S.resetKey then pcall(function() keyrelease(S.resetKey) end) end
+    S.resetKey, S.resetState = nil,nil
+end
+local function clearAction()
+    releaseMovement(true)
+    cancelReset()
+    S.target=nil; S.combatSpot=nil; S.aimPoint=nil
+end
+function S.Stop(reason)
+    if not S.running then return end
+    S.running=false
+    clearAction()
+    log("Unloaded by explicit Stop: "..tostring(reason or "external caller"))
+end
+
+local uiReady = pcall(function()
+    UI.AddTab("MM2 Candy V13", function(tab)
+        local section=tab:Section("V6-style glide", "Left")
+        section:Toggle("mm2_v13_farm", "Enable Autofarm")
+        section:Toggle("mm2_v13_finish", "Finish Rounds at 50")
+    end)
+    UI.SetValue("mm2_v13_farm",true)
+    UI.SetValue("mm2_v13_finish",true)
+end)
+local function pressed(k)
+    local down=read(function() return iskeypressed(k) end) == true
+    local rising=down and not S.keys[k]
+    S.keys[k]=down
+    return rising
+end
+local function controls()
+    local old=S.enabled
+    if uiReady then
+        local a=read(function() return UI.GetValue("mm2_v13_farm") end)
+        local b=read(function() return UI.GetValue("mm2_v13_finish") end)
+        if type(a)=="boolean" then S.enabled=a end
+        if type(b)=="boolean" then S.finish=b end
+    end
+    local f6Down=read(function() return iskeypressed(0x75) end)==true
+    if not f6Down then S.f6Armed=true end
+    if pressed(0x75) and S.f6Armed and focused() then
+        S.enabled=not S.enabled
+        if uiReady then pcall(function() UI.SetValue("mm2_v13_farm",S.enabled) end) end
+    end
+    if old~=S.enabled then
+        clearAction()
+        log("Autofarm manually changed by F6/UI: "..tostring(S.enabled))
+    end
+end
+
+local function mapNow()
+    local timer=child(workspace,"RoundTimerPart")
+    local remaining=attr(timer,"Time")
+    if type(remaining)~="number" or remaining<=0 then return nil,nil,remaining end
+    for _,m in ipairs(children(workspace)) do
+        local cc=child(m,"CoinContainer")
+        if cc then return m,cc,remaining end
+    end
+    return nil,nil,remaining
+end
+local function parseCount(text)
+    if type(text)~="string" then return nil end
+    local n=text:match("^%s*(%d+)%s*/%s*%d+%s*$") or text:match("^%s*(%d+)%s*$")
+    return n and tonumber(n)
+end
+local function readBag()
+    local box=read(function() return player.PlayerGui.MainGUI.Game.CoinBags.Container end)
+    local label
+    -- Prefer the actual Candy bag, including a plain "0" or "50" label.
+    for _,bag in ipairs(children(box)) do
+        if tostring(bag.Name):lower():find("candy",1,true) then
+            label=read(function() return bag.CurrencyFrame.Icon.Coins end)
+            if label then break end
+        end
+    end
+    if label then
+        S.raw=tostring(read(function() return label.Text end) or "")
+        S.bagSource="Candy bag"
+    else
+        S.raw="unavailable"; S.bagSource="missing"
+    end
+    -- Never substitute the legacy Coin bag or lifetime currency balance.
+    local n=label and parseCount(S.raw)
+    if not n then
+        S.bag=nil
+        notice("bag","Candy bag unreadable; farming can continue, but finishing waits for a verified /50 count.",10)
+        return
+    end
+    if n<CFG.Limit then S.seenBelowLimit=true end
+    if S.bag and n>S.bag then S.bagGain=S.bagGain+(n-S.bag) end
+    S.bag=n
+    if n>=CFG.Limit and S.seenBelowLimit then S.full=true end
+    if n>=CFG.Limit and not S.seenBelowLimit then
+        notice("stale","Bag already reads 50 at attachment/round start; waiting for a fresh round counter.",10)
+    end
+end
+local function taken(c)
+    if not c or not read(function() return c.Parent end) then return true end
+    if attr(c,"Collected")==true then return true end
+    local visual=child(c,"CoinVisual")
+    return visual and attr(visual,"Collected")==true or false
+end
+local function scanCoins(cc)
+    local list={}
+    for _,c in ipairs(children(cc)) do
+        if c.Name=="Coin_Server" and child(c,"TouchInterest") and not taken(c) then
+            local p=xyz(c)
+            if p then list[#list+1]={part=c,p=p,id=key(c)} end
+        end
+    end
+    S.coins=list
+end
+local function tool(p,word)
+    local c=read(function() return p.Character end)
+    -- Do not use ipairs({nil, backpack}): it would skip the backpack.
+    local function search(parent)
+        for _,obj in ipairs(children(parent)) do
+            if obj.ClassName=="Tool" and obj.Name:lower():find(word,1,true) then return obj end
+        end
+    end
+    return search(c) or search(child(p,"Backpack"))
+end
+local function live(p)
+    if attr(p,"Alive")~=true then return false end
+    local c=read(function() return p.Character end)
+    local h=c and read(function() return c:FindFirstChildOfClass("Humanoid") end)
+    return h and (read(function() return h.Health end) or 0)>0 and xyz(child(c,"HumanoidRootPart"))~=nil
+end
+local function role(p)
+    if tool(p,"knife") then return "Murderer" end
+    if tool(p,"gun") then return "Sheriff/Hero" end
+    return "Unarmed"
+end
+local function scanPlayers()
+    local list={}
+    for _,p in ipairs(Players:GetPlayers()) do
+        if p~=player and live(p) then list[#list+1]={player=p,role=role(p)} end
+    end
+    S.roster=list
+end
+
+-- Optional for travel; required to verify a clear ordinary shot/stab.
+local function ray(a,b,extras)
+    local c=selfParts()
+    local ok,result=pcall(function()
+        local params=RaycastParams.new()
+        local exclude={c}
+        if S.container then exclude[#exclude+1]=S.container end
+        if extras then exclude[#exclude+1]=extras end
+        params.FilterDescendantsInstances=exclude
+        params.FilterType=Enum.RaycastFilterType.Exclude
+        pcall(function() params.RespectCanCollide=true end)
+        return workspace:Raycast(vec(a),Vector3.new(b.x-a.x,b.y-a.y,b.z-a.z),params)
+    end)
+    if not ok then
+        notice("ray","Combat visibility check unavailable: "..tostring(result),10)
+        return nil,false
+    end
+    return result,true
+end
+local function farm()
+    S.phase="FARM"
+    local _,r=selfParts()
+    local p=xyz(r)
+    if not p then return end
+    local t=S.target
+    if t and (taken(t.part) or (S.bag and t.bagBefore and S.bag>t.bagBefore)) then
+        if taken(t.part) then S.collectedSignals=S.collectedSignals+1 end
+        S.cooldown[t.id]=tick()+CFG.CoinCooldown
+        S.target=nil; stopGlide(); t=nil
+    elseif t and tick()-S.targetAt>(t.timeout or CFG.CoinTimeout) then
+        S.cooldown[t.id]=tick()+CFG.CoinCooldown
+        S.target=nil; stopGlide(); t=nil
+        notice("coinTimeout","Skipping unresponsive candy; no credit assumed.",5)
+    end
+    if not t then
+        local best=math.huge
+        for _,candidate in ipairs(S.coins) do
+            if tick()>=(S.cooldown[candidate.id] or 0) and not taken(candidate.part) then
+                local cp=xyz(candidate.part)
+                local d=cp and dist(p,cp)
+                if d and d<best and d<=CFG.MaxTargetDistance then best=d; t=candidate end
+            end
+        end
+        if t then
+            S.target=t; S.targetAt=tick(); S.attempts=S.attempts+1
+            t.bagBefore=S.bag
+            t.rate=S.first and CFG.FirstSpeed or CFG.Speed
+            S.first=false
+            t.timeout=math.max(CFG.CoinTimeout,best/t.rate+3)
+        else S.phase="WAIT CANDY"; stopGlide(); return end
+    end
+    local goal=xyz(t.part)
+    if not goal then S.target=nil; stopGlide(); return end
+    local f=S.flight
+    if f and f.goalID==t.id and f.arrived then
+        S.phase="PICKUP"
+        -- Hold exact coin position, with no downward offset, while pickup replicates.
+        if tick()-f.arrivedAt>=CFG.PickupHold and dist(p,goal)<1 then
+            -- Allow up to 1.2 seconds for the bag/Collected state to update.
+            if tick()-f.arrivedAt>=1.2 then
+                S.cooldown[t.id]=tick()+CFG.CoinCooldown
+                S.target=nil; stopGlide()
+            end
+        end
+    else startGlide(goal,t.id,t.rate) end
+end
+
+-- Combat UI guard. UI hit-testing is preferred; property-based bounds scanning
+-- supports Matcha builds without the engine hit-test method.
+local function visibleGui(o,rootGui)
+    local p=o
+    for i=1,40 do
+        if not p then return false end
+        if p==rootGui then return true end
+        if read(function() return p.Visible end)==false
+            or read(function() return p.Enabled end)==false then return false end
+        p=read(function() return p.Parent end)
+    end
+    return false
+end
+local function blocksInput(o,w,h)
+    local cls=read(function() return o.ClassName end)
+    if cls=="TextButton" or cls=="ImageButton" or cls=="TextBox" then return true end
+    if read(function() return o.Active end)==true then return true end
+    local size=read(function() return o.AbsoluteSize end)
+    if size and size.X*size.Y>w*h*0.2 then
+        local opacity=read(function() return o.BackgroundTransparency end)
+        if type(opacity)=="number" and opacity<0.9 then return true end
+        if cls=="ImageLabel" then
+            local transparency=read(function() return o.ImageTransparency end)
+            if transparency==nil or transparency<0.9 then return true end
+        end
+    end
+    return false
+end
+local function guiAt(rootGui,x,y,w,h)
+    if not rootGui then return false,"GUI root unavailable" end
+    local ok,list=pcall(function() return rootGui:GetGuiObjectsAtPosition(x,y) end)
+    if ok and type(list)=="table" then
+        for _,o in ipairs(list) do
+            if visibleGui(o,rootGui) and blocksInput(o,w,h) then
+                return false,tostring(o.Name)
+            end
+        end
+        return true
+    end
+    ok,list=pcall(function() return rootGui:GetDescendants() end)
+    if not ok or type(list)~="table" then return false,"GUI inspection unavailable" end
+    for _,o in ipairs(list) do
+        if visibleGui(o,rootGui) and blocksInput(o,w,h) then
+            local pos=read(function() return o.AbsolutePosition end)
+            local size=read(function() return o.AbsoluteSize end)
+            if not pos or not size then return false,"GUI bounds unreadable: "..tostring(o.Name) end
+            if x>=pos.X and x<=pos.X+size.X and y>=pos.Y and y<=pos.Y+size.Y then
+                return false,tostring(o.Name)
+            end
+        end
+    end
+    return true
+end
+local function inputGuard(point)
+    if not focused() then return false,"Roblox not focused" end
+    local gs=read(function() return game:GetService("GuiService") end)
+    local us=read(function() return game:GetService("UserInputService") end)
+    if gs and read(function() return gs.MenuIsOpen end)==true then
+        return false,"Roblox menu open"
+    end
+    local focusedBox=us and read(function() return us:GetFocusedTextBox() end)
+    if focusedBox then return false,"Text entry focused" end
+    local camera=read(function() return workspace.CurrentCamera end)
+    local view=camera and read(function() return camera.ViewportSize end)
+    if not view or not finite(view.X) or not finite(view.Y) then return false,"Viewport unreadable" end
+    local x,y=point and point.X or view.X/2,point and point.Y or view.Y/2
+    -- Shots must remain in the central play area, away from sidebar/topbar buttons.
+    if x<view.X*0.25 or x>view.X*0.75 or y<view.Y*0.25 or y>view.Y*0.75 then
+        return false,"Aim outside central play area"
+    end
+    local pg=child(player,"PlayerGui")
+    local cg=read(function() return game:GetService("CoreGui") end)
+    -- Check both viewport and inset-adjusted positions, conservatively.
+    local inset=gs and read(function() return gs:GetGuiInset() end)
+    local offsets={0}
+    if inset and finite(inset.Y) and inset.Y~=0 then offsets={0,inset.Y,-inset.Y} end
+    for _,offset in ipairs(offsets) do
+        local ok,why=guiAt(pg,x,y+offset,view.X,view.Y)
+        if not ok then return false,"PlayerGui: "..why end
+        ok,why=guiAt(cg,x,y+offset,view.X,view.Y)
+        if not ok then return false,"CoreGui: "..why end
+    end
+    return true
+end
+local function combatInputReady(point)
+    local ok,why=inputGuard(point)
+    S.uiBlock=ok and "none" or tostring(why)
+    if not ok then
+        notice("gui","Attack input paused: "..S.uiBlock..". Farming remains enabled.",8)
+    end
+    return ok
+end
+
+local function inputReady()
+    if not focused() then return false end
+    pcall(function() setrobloxinput(true) end)
+    return true
+end
+local function tap(k)
+    if not inputReady() then return false end
+    local ok,err=pcall(function() keypress(k) end)
+    if ok then
+        task.wait(0.04)
+        pcall(function() keyrelease(k) end)
+    else notice("key","Keyboard input unavailable: "..tostring(err),10) end
+    return ok
+end
+local function equip(wanted)
+    local c=selfParts()
+    local t=tool(player,wanted)
+    if not t then return nil end
+    if read(function() return t.Parent end)==c then return t end
+    if not combatInputReady() then return nil end
+    if tick()<S.nextEquip then return nil end
+    S.nextEquip=tick()+CFG.EquipDelay
+    -- Standard Roblox number-key equip. Verify the weapon moved into Character.
+    -- Backpack ordering is a best effort; manually equipping also works.
+    local slot=0
+    for _,item in ipairs(children(c)) do
+        if item.ClassName=="Tool" then slot=slot+1 end
+    end
+    for _,item in ipairs(children(child(player,"Backpack"))) do
+        if item.ClassName=="Tool" then
+            slot=slot+1
+            if item==t then
+                if slot<=9 then tap(0x30+slot)
+                else notice("equip","Weapon slot >9; equip "..wanted.." manually.",8) end
+                break
+            end
+        end
+    end
+    notice("equip","Equipping "..wanted.." with number-key input; waiting for Character tool.",6)
+    return nil
+end
+local function aimAt(target)
+    S.aimPoint=nil
+    if not combatInputReady() then return false end
+    local part=child(target.Character,"HumanoidRootPart")
+    local p=xyz(part)
+    if not p then return false end
+    local camera=read(function() return workspace.CurrentCamera end)
+    if not camera then return false end
+    local ok,err=pcall(function()
+        camera.CFrame=CFrame.lookAt(camera.CFrame.Position,vec(p))
+    end)
+    if not ok then notice("aim","Camera aim unavailable: "..tostring(err),8); return false end
+    task.wait(0.08)
+    local projected,onScreen
+    ok=pcall(function()
+        local fresh=xyz(child(target.Character,"HumanoidRootPart"))
+        if fresh then projected,onScreen=WorldToScreen(vec(fresh)) end
+    end)
+    if not ok or not onScreen or not projected or not combatInputReady(projected) then return false end
+    -- Matcha documents WorldToScreen and mousemoveabs in the SAME viewport space.
+    -- V12's additional guessed window offset could steer the cursor into UI.
+    ok=pcall(function() mousemoveabs(math.floor(projected.X),math.floor(projected.Y)) end)
+    if not ok then return false end
+    task.wait(0.08)
+    local check=read(function() return player:GetMouse() end)
+    if not check then return false end
+    local x,y=read(function() return check.X end),read(function() return check.Y end)
+    if not finite(x) or not finite(y) then return false end
+    local freshPoint,freshVisible
+    ok=pcall(function()
+        local fresh=xyz(child(target.Character,"HumanoidRootPart"))
+        if fresh then freshPoint,freshVisible=WorldToScreen(vec(fresh)) end
+    end)
+    if not ok or not freshVisible or not freshPoint then return false end
+    if (freshPoint.X-x)^2+(freshPoint.Y-y)^2>12^2 then return false end
+    S.aimPoint={X=x,Y=y}
+    return combatInputReady(S.aimPoint)
+end
+local function shotClear(target)
+    local c,r=selfParts()
+    local other=read(function() return target.Character end)
+    local a=xyz(child(c,"Head")) or xyz(r)
+    local b=xyz(child(other,"HumanoidRootPart"))
+    -- Exclude only self and pickups: another player must block a sheriff shot.
+    local hit,ok
+    if a and b then hit,ok=ray(a,b) end
+    return ok and (not hit or read(function() return hit.Instance:IsDescendantOf(other) end)==true)
+end
+local function combatPosition(target)
+    local other=target.Character
+    local q=xyz(child(other,"HumanoidRootPart"))
+    local _,r=selfParts()
+    local p=xyz(r)
+    if not p or not q then return nil end
+    local saved=S.combatSpot
+    if saved and saved.id==key(target) and dist(saved.targetPos,q)<0.7 then return saved.p end
+    local d=flat(p,q)
+    local dx,dz=0,1
+    if d>0.1 then dx,dz=(p.x-q.x)/d,(p.z-q.z)/d end
+    for _,angle in ipairs({0,45,-45,90,-90,135,-135,180}) do
+        local a=math.rad(angle)
+        local x=dx*math.cos(a)-dz*math.sin(a)
+        local z=dx*math.sin(a)+dz*math.cos(a)
+        local pos={x=q.x+x*CFG.CombatStand,y=q.y,z=q.z+z*CFG.CombatStand}
+        local hit,ok=ray({x=pos.x,y=q.y+2,z=pos.z},{x=pos.x,y=q.y-7,z=pos.z},other)
+        local hp=hit and read(function() return hit.Position end)
+        local normal=hit and read(function() return hit.Normal end)
+        if ok and hp and hp.Y<q.y-1 and hp.Y>=q.y-4.5
+            and (not normal or normal.Y>=0.65) then
+            -- Match the standing target's elevation, never the current fallen Y.
+            pos.y=q.y+0.15
+            local blocked,clear=ray({x=pos.x,y=pos.y+1,z=pos.z},{x=q.x,y=q.y+1,z=q.z},other)
+            local crossX,cx=ray({x=pos.x-1,y=pos.y,z=pos.z},{x=pos.x+1,y=pos.y,z=pos.z},other)
+            local crossZ,cz=ray({x=pos.x,y=pos.y,z=pos.z-1},{x=pos.x,y=pos.y,z=pos.z+1},other)
+            if clear and not blocked and cx and not crossX and cz and not crossZ then
+                S.combatSpot={id=key(target),p=pos,targetPos=q}
+                S.stableAt=nil
+                return pos
+            end
+        end
+    end
+    notice("stance","No clear grounded position three studs from target; retrying.",5)
+    return nil
+end
+local function settleCombat(target)
+    local pos=combatPosition(target)
+    if not pos then stopGlide(); return false end
+    local _,r=selfParts()
+    local p=xyz(r)
+    if not p then return false end
+    if dist(p,pos)>0.65 then
+        S.stableAt=nil
+        startGlide(pos,"stance:"..key(target),CFG.Speed)
+        return false
+    end
+    if S.flight then
+        -- End noclip only after reaching the verified floor-supported stance.
+        -- Gravity then rests the character on the floor during aim/reload.
+        if not writePosition(r,pos) then
+            motionFailure("Could not settle at combat stance.")
+            return false
+        end
+        releaseMovement(false)
+        zeroVelocity(r)
+        S.stableAt=tick()
+        return false
+    end
+    S.stableAt=S.stableAt or tick()
+    return tick()-S.stableAt>=0.25
+end
+local function resetTick()
+    S.phase="RESET"
+    releaseMovement(true)
+    if not CFG.AllowReset then S.phase="FULL"; return end
+    if not inputReady() then return end
+    -- Use the normal Reset Character menu, not a local Health write.
+    if S.resetState=="done" then return end
+    if tick()<S.resetAt then return end
+    if S.resetState==nil then
+        if not combatInputReady() then return end
+        log("Requesting normal character reset (Esc, R, Enter).")
+        if tap(0x1B) then S.resetState="r"; S.resetAt=tick()+0.5 end
+    elseif S.resetState=="r" then
+        if tap(0x52) then S.resetState="enter"; S.resetAt=tick()+0.5 end
+    elseif S.resetState=="enter" then
+        if tap(0x0D) then S.resetState="verify"; S.resetAt=tick()+3 end
+    elseif S.resetState=="verify" then
+        S.resetState="done"
+        notice("reset","Reset input sent; if still alive, reset manually. No server reset assumed.",30)
+    end
+end
+local function finish()
+    local current=role(player)
+    if not S.finish then resetTick(); return end
+    if current=="Unarmed" then
+        S.unarmedAt=S.unarmedAt or tick()
+        stopGlide(); S.phase="WAIT WEAPON"
+        if tick()-S.unarmedAt>=3 then resetTick() end
+        return
+    end
+    S.unarmedAt=nil
+    if not S.finishAt then
+        S.finishAt=tick(); S.target=nil; stopGlide()
+        log("50 candies confirmed; "..current.." will approach targets and use ordinary clicks.")
+    end
+    if S.finishElapsed>=CFG.FinishTimeout then
+        notice("finishTimeout","Finish time budget reached; requesting reset.",30)
+        resetTick(); return
+    end
+    S.phase="FINISH "..current
+    local wanted=current=="Murderer" and "knife" or "gun"
+    local weapon=equip(wanted)
+    if not weapon then stopGlide(); return end
+    local _,r=selfParts()
+    local p=xyz(r)
+    if not p then return end
+    local t=S.target
+    if t and t.player then
+        -- Health/Alive, not number of clicks, decides whether a kill was observed.
+        local victim=t.player
+        local char=read(function() return victim.Character end)
+        local hum=char and read(function() return char:FindFirstChildOfClass("Humanoid") end)
+        local dead=attr(victim,"Alive")==false or (hum and (read(function() return hum.Health end) or 1)<=0)
+        if dead then
+            S.eliminated=S.eliminated+1
+            log("Elimination observed: "..victim.Name.." (attribution not proven).")
+            S.target=nil; S.nav=nil; t=nil
+        elseif not live(victim) or (current~="Murderer" and not tool(victim,"knife")) then
+            S.target=nil; S.nav=nil; t=nil
+        elseif tick()-S.targetAt>CFG.TargetTimeout then
+            S.victims[key(victim)]=tick()+5
+            notice("targetTimeout","Target not eliminated within time limit; retrying later.",5)
+            S.target=nil; S.nav=nil; t=nil
+        end
+    elseif t then S.target=nil; t=nil end
+    if not t then
+        local best=math.huge
+        for _,entry in ipairs(S.roster) do
+            local v=entry.player
+            if live(v) and (current=="Murderer" or tool(v,"knife"))
+                and tick()>=(S.victims[key(v)] or 0) then
+                local q=xyz(child(v.Character,"HumanoidRootPart"))
+                if q and dist(p,q)<best then best=dist(p,q); t=entry end
+            end
+        end
+        S.target=t; S.targetAt=tick()
+        if not t then
+            stopGlide()
+            notice("noTarget","No eligible live target visible; waiting for replicated weapons/Alive.",8)
+            return
+        end
+        log("Approaching "..t.player.Name)
+    end
+    local other=t.player.Character
+    local q=xyz(child(other,"HumanoidRootPart"))
+    if not q then return end
+    local range=current=="Murderer" and CFG.KnifeRange or CFG.GunRange
+    if not settleCombat(t.player) then return end
+    if not shotClear(t.player) then
+        S.combatSpot=nil
+        return
+    end
+    if tick()<S.nextAttack or tick()<S.nextAim then return end
+    S.nextAim=tick()+0.2
+    if not inputReady() then return end
+    if read(function() return ismouse2pressed() end)==true then return end
+    if not aimAt(t.player) then
+        notice("aimFail","Aim not ready; no click sent. Keep Roblox focused and release right mouse.",8)
+        return
+    end
+    -- Revalidate after aiming yielded: no wrong-role, off-screen or wall shot.
+    if not S.running or not S.enabled or not focused() or not live(t.player) then return end
+    local map=mapNow()
+    if not map or key(map)~=S.mapKey or not live(player) then return end
+    local myChar,myRoot=selfParts()
+    local nowPos=xyz(myRoot)
+    local targetPos=xyz(child(t.player.Character,"HumanoidRootPart"))
+    if not nowPos or not targetPos or dist(nowPos,targetPos)>range+0.5 then return end
+    if read(function() return weapon.Parent end)~=myChar or not shotClear(t.player) then return end
+    if current~="Murderer" and not tool(t.player,"knife") then return end
+    if not S.aimPoint or not combatInputReady(S.aimPoint) then return end
+    -- Check cursor again immediately before clicking; never click a stale point.
+    local mouse=read(function() return player:GetMouse() end)
+    local mx=mouse and read(function() return mouse.X end)
+    local my=mouse and read(function() return mouse.Y end)
+    if not finite(mx) or not finite(my) or (mx-S.aimPoint.X)^2+(my-S.aimPoint.Y)^2>6^2 then return end
+    local ok,err=pcall(function() mouse1click() end)
+    if ok then
+        S.clicks=S.clicks+1
+        S.nextAttack=tick()+(current=="Murderer" and CFG.KnifeDelay or CFG.GunDelay)
+        notice("click","Normal "..wanted.." click at "..t.player.Name.."; waiting for elimination evidence.",3)
+    else notice("clickFail","Mouse input failed: "..tostring(err),8) end
+end
+
+local function beginRound(map,cc,charKey)
+    clearAction()
+    S.round=S.round+1; S.mapKey=key(map); S.charKey=charKey; S.container=cc
+    S.bag=nil; S.full=false; S.seenBelowLimit=false
+    S.coins={}; S.cooldown={}; S.victims={}; S.roster={}
+    S.attempts=0; S.collectedSignals=0; S.bagGain=0; S.eliminated=0; S.clicks=0
+    S.nextBag=0; S.nextCoins=0; S.nextPlayers=0
+    S.finishAt=nil; S.finishElapsed=0; S.unarmedAt=nil; S.active=true
+    S.first=true; S.moveWrites=0; S.moved=0; S.lastMoveError="none"
+    S.retryAt=0; S.retryCount=0; S.combatSpot=nil; S.stableAt=nil; S.uiBlock="none"
+    log("Round/character ready: "..map.Name..". V6-style direct glide; Candy bag counter.")
+end
+local function step(dt)
+    controls()
+    if not S.running then return end
+    local map,cc,left=mapNow()
+    local c,r,h=selfParts()
+    local charKey=c and key(c)
+    local active=map~=nil and r~=nil and h~=nil and live(player)
+    if active and (not S.active or key(map)~=S.mapKey or charKey~=S.charKey) then
+        beginRound(map,cc,charKey)
+    elseif not active and S.active then
+        clearAction(); S.active=false; S.safe=nil
+        S.phase="LOBBY/DEAD"; log("Round ended or character inactive.")
+    end
+    if not active then S.phase="WAIT ROUND / DEAD"
+    elseif not S.enabled then S.phase="OFF" end
+    if active then
+        if tick()>=S.nextBag then S.nextBag=tick()+0.5; readBag() end
+        if tick()>=S.nextCoins then S.nextCoins=tick()+0.75; scanCoins(cc) end
+        if tick()>=S.nextPlayers then S.nextPlayers=tick()+0.5; if S.full then scanPlayers() end end
+    end
+    if tick()>=S.nextStatus then
+        S.nextStatus=tick()+5
+        log("STATUS Phase="..S.phase.." Candy="..tostring(S.bag).." Source="..S.bagSource
+            .." Raw="..S.raw.." Eligible="..#S.coins.." Attempts="..S.attempts
+            .." TakenSignals="..S.collectedSignals.." BagGain="..S.bagGain
+            .." Clicks="..S.clicks.." EliminationsObserved="..S.eliminated
+            .." Move="..S.moveMode.." Writes="..S.moveWrites
+            .." ObservedMove="..string.format("%.2f",S.moved)
+            .." MoveError="..S.lastMoveError.." UI="..S.uiBlock
+            .." Timer="..tostring(left).." Enabled="..tostring(S.enabled))
+    end
+    if not active or not S.enabled then return end
+    if tick()<S.retryAt then S.phase="RECOVER"; return end
+    if S.full and not focused() then
+        if not S.paused then stopGlide(); cancelReset(); S.paused=true end
+        S.phase="WAIT FOCUS"
+        notice("focus","Focus the attached Roblox window to resume; input/movement paused.",10)
+        return
+    end
+    if S.paused then
+        S.paused=false
+        -- Paused time must not expire a target or trigger an early reset.
+        S.targetAt=tick()
+        S.nextNav=0
+    end
+    if S.full then
+        if S.finishAt then S.finishElapsed=S.finishElapsed+dt end
+        finish()
+    elseif S.bag and S.bag>=CFG.Limit then
+        stopGlide(); S.phase="WAIT FRESH BAG"
+    else farm() end
+end
+
+log("Main account verified. F6 toggles while Roblox focused; no F8 unload shortcut.")
+log("V6-style XYZ glide, speed 20, first speed 999. Correct Candy bag; no under-map offset.")
+-- Keep supporting the character while the controller scans counters/targets or aims.
+task.spawn(function()
+    while S.running do
+        task.wait(CFG.MoveTick)
+        if not S.running then break end
+        local ok,err=pcall(movementTick)
+        if not ok then motionFailure("Movement worker error: "..tostring(err)) end
+    end
+end)
+local last=tick()
+while S.running do
+    task.wait(CFG.Tick)
+    local now=tick()
+    local dt=math.min(now-last,1)
+    last=now
+    local ok,err=pcall(function() step(dt) end)
+    if not ok then
+        motionFailure("Controller error: "..tostring(err))
+    end
+end
