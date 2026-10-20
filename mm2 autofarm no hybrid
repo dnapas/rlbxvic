@@ -1,4 +1,4 @@
--- MM2 Candy V13 - V6-style direct glide / ordinary weapon input
+-- MM2 Candy V14 - V6-style direct glide / ordinary weapon input
 -- Stop V6/V10 and other old loops; respawn once before first use.
 -- F6 deliberately toggles farming while Roblox is focused. No F8 unload binding.
 -- Candy movement does not need window focus. Recoverable errors retry automatically.
@@ -9,7 +9,7 @@
 local CFG = {
     Username = "oneovernull",
     Limit = 50,
-    Speed = 30,              -- Same normal travel speed as the supplied V6. 			-- Updated from 20 to 30
+    Speed = 20,              -- Same normal travel speed as the supplied V6.
     FirstSpeed = 999,         -- Same fast initial approach as V6.
     MoveTick = 0.03,
     PickupHold = 0.35,
@@ -34,7 +34,7 @@ local function read(fn)
     local ok, value = pcall(fn)
     if ok then return value end
 end
-local function log(s) print("[V13] " .. tostring(s)) end
+local function log(s) print("[V14] " .. tostring(s)) end
 local function child(p, name)
     return p and read(function() return p:FindFirstChild(name) end)
 end
@@ -79,9 +79,11 @@ end
 local v11 = read(function() return _G.MM2_CANDY_V11 end)
 if v11 and type(v11.Stop)=="function" then v11.Stop() end
 local v12=read(function() return _G.MM2_CANDY_V12 end)
-if v12 and type(v12.Stop)=="function" then v12.Stop("replaced by V13") end
-local previous = read(function() return _G.MM2_CANDY_V13 end)
-if previous and type(previous.Stop) == "function" then previous.Stop("replaced by new V13 instance") end
+if v12 and type(v12.Stop)=="function" then v12.Stop("replaced by V14") end
+local v13=read(function() return _G.MM2_CANDY_V13 end)
+if v13 and type(v13.Stop)=="function" then v13.Stop("replaced by V14") end
+local previous = read(function() return _G.MM2_CANDY_V14 end)
+if previous and type(previous.Stop) == "function" then previous.Stop("replaced by new V14 instance") end
 local S = {
     running=true, enabled=true, finish=true, phase="WAIT ROUND",
     active=false, round=0, charKey=nil, mapKey=nil, paused=false,
@@ -97,7 +99,7 @@ local S = {
     retryAt=0, retryCount=0, f6Armed=false, combatSpot=nil,
     uiBlock="none", aimPoint=nil, stableAt=nil,
 }
-pcall(function() _G.MM2_CANDY_V13 = S end)
+pcall(function() _G.MM2_CANDY_V14 = S end)
 local function notice(tag,msg,delay)
     if tick() >= (S.nextLog[tag] or 0) then
         S.nextLog[tag] = tick() + (delay or 6)
@@ -165,6 +167,10 @@ local function stopGlide()
         -- on every combat tick ratcheted V12's hold downward through the floor.
         f.segment=nil
         f.hold=f.lastCommand or f.hold
+        f.intent="hold"
+        f.commandDistance=0
+        f.checkPos=xyz(f.root) or f.hold
+        f.nextCheck=tick()+CFG.MoveStallSeconds
     end
 end
 local function refreshNoclip(c)
@@ -212,7 +218,7 @@ local function startGlide(goal,id,rate)
     if f.segment and f.segment.id==id and dist(f.segment.goal,goal)<1 then return true end
     if not f.segment and f.goalID==id and dist(f.hold,goal)<0.2 then return true end
     f.segment={from=p,goal=goal,at=tick(),duration=dist(p,goal)/math.max(rate,1),id=id}
-    f.goalID=id; f.arrived=false
+    f.goalID=id; f.arrived=false; f.intent="travel"
     return true
 end
 local function movementTick()
@@ -242,12 +248,19 @@ local function movementTick()
             f.segment=nil; f.arrived=true; f.arrivedAt=tick()
         end
     end
-    -- Compare observed motion, not just whether a setter returned successfully.
-    f.commandDistance=math.max(f.commandDistance,dist(f.checkPos,desired))
+    -- Only diagnose stalled TRAVEL. Holding still is intentional at full bag,
+    -- while equipping, and while waiting for focus/UI.
+    if f.intent=="travel" and not f.segment and dist(observed,desired)<0.5 then
+        f.intent="hold"
+        f.commandDistance=0
+    end
+    if f.intent=="travel" then
+        f.commandDistance=math.max(f.commandDistance,dist(f.checkPos,desired))
+    else f.commandDistance=0 end
     if tick()>=f.nextCheck then
         local moved=dist(observed,f.checkPos)
         S.moved=moved
-        if f.commandDistance>2 and moved<0.25 then
+        if f.intent=="travel" and f.commandDistance>2 and moved<0.25 then
             if S.moveMode=="Position" then
                 S.moveMode="CFrame"
                 log("Position writes produced no observed travel; trying CFrame.")
@@ -288,13 +301,13 @@ function S.Stop(reason)
 end
 
 local uiReady = pcall(function()
-    UI.AddTab("MM2 Candy V13", function(tab)
+    UI.AddTab("MM2 Candy V14", function(tab)
         local section=tab:Section("V6-style glide", "Left")
-        section:Toggle("mm2_v13_farm", "Enable Autofarm")
-        section:Toggle("mm2_v13_finish", "Finish Rounds at 50")
+        section:Toggle("mm2_v14_farm", "Enable Autofarm")
+        section:Toggle("mm2_v14_finish", "Finish Rounds at 50")
     end)
-    UI.SetValue("mm2_v13_farm",true)
-    UI.SetValue("mm2_v13_finish",true)
+    UI.SetValue("mm2_v14_farm",true)
+    UI.SetValue("mm2_v14_finish",true)
 end)
 local function pressed(k)
     local down=read(function() return iskeypressed(k) end) == true
@@ -305,8 +318,8 @@ end
 local function controls()
     local old=S.enabled
     if uiReady then
-        local a=read(function() return UI.GetValue("mm2_v13_farm") end)
-        local b=read(function() return UI.GetValue("mm2_v13_finish") end)
+        local a=read(function() return UI.GetValue("mm2_v14_farm") end)
+        local b=read(function() return UI.GetValue("mm2_v14_finish") end)
         if type(a)=="boolean" then S.enabled=a end
         if type(b)=="boolean" then S.finish=b end
     end
@@ -314,7 +327,7 @@ local function controls()
     if not f6Down then S.f6Armed=true end
     if pressed(0x75) and S.f6Armed and focused() then
         S.enabled=not S.enabled
-        if uiReady then pcall(function() UI.SetValue("mm2_v13_farm",S.enabled) end) end
+        if uiReady then pcall(function() UI.SetValue("mm2_v14_farm",S.enabled) end) end
     end
     if old~=S.enabled then
         clearAction()
@@ -508,29 +521,110 @@ local function blocksInput(o,w,h)
     end
     return false
 end
+local function rect(o)
+    local p=read(function() return o.AbsolutePosition end)
+    local z=read(function() return o.AbsoluteSize end)
+    if p and z and finite(p.X) and finite(p.Y) and finite(z.X) and finite(z.Y) then
+        return {x=p.X,y=p.Y,w=z.X,h=z.Y}
+    end
+end
+local function contains(r,x,y)
+    return r.w>0 and r.h>0 and x>=r.x and x<=r.x+r.w and y>=r.y and y<=r.y+r.h
+end
+local function rendered(o,rootGui)
+    local p=o
+    local layer=false
+    for i=1,40 do
+        if not p then return false end
+        if p==rootGui then return layer end
+        local cls=read(function() return p.ClassName end)
+        if cls=="ScreenGui" or cls=="BillboardGui" or cls=="SurfaceGui" then layer=true end
+        if read(function() return p.Visible end)==false
+            or read(function() return p.Enabled end)==false then return false end
+        p=read(function() return p.Parent end)
+    end
+    return false
+end
+local function resolveRect(o,rootGui,depth)
+    local absolute=rect(o)
+    if absolute then return absolute end
+    if depth>12 then return nil end
+    local parent=read(function() return o.Parent end)
+    if not parent or parent==rootGui then return nil end
+    local pr=resolveRect(parent,rootGui,depth+1)
+    if not pr then return nil end
+    local position=read(function() return o.Position end)
+    local size=read(function() return o.Size end)
+    local anchor=read(function() return o.AnchorPoint end)
+    if not position or not size or not anchor then return nil end
+    local ok,result=pcall(function()
+        -- Layout constraints/UIScale can override UDim2; do not guess through them.
+        for _,item in ipairs(children(parent)) do
+            if item.ClassName=="UIListLayout" or item.ClassName=="UIGridLayout"
+                or item.ClassName=="UIScale" then return nil end
+        end
+        for _,item in ipairs(children(o)) do
+            if item.ClassName=="UIAspectRatioConstraint" or item.ClassName=="UISizeConstraint"
+                or item.ClassName=="UIScale" then return nil end
+        end
+        local rotation=read(function() return o.Rotation end)
+        if rotation and rotation~=0 then return nil end
+        local w=pr.w*size.X.Scale+size.X.Offset
+        local h=pr.h*size.Y.Scale+size.Y.Offset
+        local x=pr.x+pr.w*position.X.Scale+position.X.Offset-w*anchor.X
+        local y=pr.y+pr.h*position.Y.Scale+position.Y.Offset-h*anchor.Y
+        local scroll=read(function() return parent.CanvasPosition end)
+        if scroll then x=x-scroll.X; y=y-scroll.Y end
+        if finite(x) and finite(y) and finite(w) and finite(h) then
+            return {x=x,y=y,w=w,h=h}
+        end
+    end)
+    return ok and result or nil
+end
+local function clippedAway(o,rootGui,x,y)
+    local p=read(function() return o.Parent end)
+    for i=1,40 do
+        if not p or p==rootGui then return false end
+        if read(function() return p.ClipsDescendants end)==true then
+            local bounds=rect(p)
+            if bounds and not contains(bounds,x,y) then return true end
+        end
+        p=read(function() return p.Parent end)
+    end
+    return false
+end
 local function guiAt(rootGui,x,y,w,h)
     if not rootGui then return false,"GUI root unavailable" end
     local ok,list=pcall(function() return rootGui:GetGuiObjectsAtPosition(x,y) end)
     if ok and type(list)=="table" then
+        -- Successful engine hit testing establishes that these objects are rendered.
         for _,o in ipairs(list) do
-            if visibleGui(o,rootGui) and blocksInput(o,w,h) then
-                return false,tostring(o.Name)
-            end
+            if visibleGui(o,rootGui) and blocksInput(o,w,h) then return false,tostring(o.Name) end
         end
         return true
     end
     ok,list=pcall(function() return rootGui:GetDescendants() end)
     if not ok or type(list)~="table" then return false,"GUI inspection unavailable" end
     for _,o in ipairs(list) do
-        if visibleGui(o,rootGui) and blocksInput(o,w,h) then
-            local pos=read(function() return o.AbsolutePosition end)
-            local size=read(function() return o.AbsoluteSize end)
-            if not pos or not size then return false,"GUI bounds unreadable: "..tostring(o.Name) end
-            if x>=pos.X and x<=pos.X+size.X and y>=pos.Y and y<=pos.Y+size.Y then
-                return false,tostring(o.Name)
+        if rendered(o,rootGui) and blocksInput(o,w,h) and not clippedAway(o,rootGui,x,y) then
+            local bounds=resolveRect(o,rootGui,0)
+            if not bounds then
+                local path=read(function() return o:GetFullName() end) or tostring(o.Name)
+                return false,"Rendered GUI bounds unreadable: "..path
             end
+            if contains(bounds,x,y) then return false,tostring(o.Name) end
         end
     end
+    return true
+end
+local function keyboardGuard()
+    if not focused() then return false,"Roblox not focused" end
+    local gs=read(function() return game:GetService("GuiService") end)
+    local us=read(function() return game:GetService("UserInputService") end)
+    if gs and read(function() return gs.MenuIsOpen end)==true then return false,"Roblox menu open" end
+    if us and read(function() return us:GetFocusedTextBox() end) then return false,"Text entry focused" end
+    -- Number-key equipment is not a mouse click. Unrelated GUI rectangles do
+    -- not establish that a text field has keyboard focus.
     return true
 end
 local function inputGuard(point)
@@ -592,7 +686,12 @@ local function equip(wanted)
     local t=tool(player,wanted)
     if not t then return nil end
     if read(function() return t.Parent end)==c then return t end
-    if not combatInputReady() then return nil end
+    local keyboardOK,keyboardWhy=keyboardGuard()
+    if not keyboardOK then
+        S.uiBlock=keyboardWhy
+        notice("equipInput","Equip paused: "..keyboardWhy,8)
+        return nil
+    end
     if tick()<S.nextEquip then return nil end
     S.nextEquip=tick()+CFG.EquipDelay
     -- Standard Roblox number-key equip. Verify the weapon moved into Character.
@@ -783,7 +882,7 @@ local function finish()
             S.target=nil; S.nav=nil; t=nil
         elseif not live(victim) or (current~="Murderer" and not tool(victim,"knife")) then
             S.target=nil; S.nav=nil; t=nil
-        elseif tick()-S.targetAt>CFG.TargetTimeout then
+        elseif tick()-S.targetAt>(S.targetTravelBudget or CFG.TargetTimeout) then
             S.victims[key(victim)]=tick()+5
             notice("targetTimeout","Target not eliminated within time limit; retrying later.",5)
             S.target=nil; S.nav=nil; t=nil
@@ -805,7 +904,11 @@ local function finish()
             notice("noTarget","No eligible live target visible; waiting for replicated weapons/Alive.",8)
             return
         end
-        log("Approaching "..t.player.Name)
+        -- The fixed 18-second limit could expire before crossing a large map.
+        local targetPos=xyz(child(t.player.Character,"HumanoidRootPart"))
+        local travel=targetPos and dist(p,targetPos)/math.max(CFG.Speed,1) or 0
+        S.targetTravelBudget=travel+CFG.TargetTimeout
+        log("Approaching "..t.player.Name.." (travel + attack budget "..math.ceil(S.targetTravelBudget).."s)")
     end
     local other=t.player.Character
     local q=xyz(child(other,"HumanoidRootPart"))
@@ -858,6 +961,7 @@ local function beginRound(map,cc,charKey)
     S.finishAt=nil; S.finishElapsed=0; S.unarmedAt=nil; S.active=true
     S.first=true; S.moveWrites=0; S.moved=0; S.lastMoveError="none"
     S.retryAt=0; S.retryCount=0; S.combatSpot=nil; S.stableAt=nil; S.uiBlock="none"
+    S.targetTravelBudget=nil; S.moveMode="Position"
     log("Round/character ready: "..map.Name..". V6-style direct glide; Candy bag counter.")
 end
 local function step(dt)
@@ -877,7 +981,7 @@ local function step(dt)
     elseif not S.enabled then S.phase="OFF" end
     if active then
         if tick()>=S.nextBag then S.nextBag=tick()+0.5; readBag() end
-        if tick()>=S.nextCoins then S.nextCoins=tick()+0.75; scanCoins(cc) end
+        if not S.full and tick()>=S.nextCoins then S.nextCoins=tick()+0.75; scanCoins(cc) end
         if tick()>=S.nextPlayers then S.nextPlayers=tick()+0.5; if S.full then scanPlayers() end end
     end
     if tick()>=S.nextStatus then
